@@ -24,4 +24,5 @@ Imports:
     magrittr,
     openxlsx,
     gplyr,
-    fs
+    fs,
+    rlang

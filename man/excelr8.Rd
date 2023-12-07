@@ -10,7 +10,8 @@ excelr8(
   formatting.template.path = NULL,
   wb = NULL,
   output.file.name = NULL,
-  column.names = FALSE
+  column.names = FALSE,
+  messages_first_data_row = NULL
 )
 }
 \arguments{
@@ -25,6 +26,9 @@ excelr8(
 \item{output.file.name}{Character string specifying the name of the output Excel file. Default is NULL.}
 
 \item{column.names}{Logical indicating whether to include column names. Default is FALSE.}
+
+\item{messages_first_data_row}{An intiger indicating which rows the messages start at. Default is NULL.
+If NULL, the program looks to the Cell Info tab of the workbook template to infer a logical value.}
 }
 \value{
 If output.file.name is NULL, returns the modified workbook object. Otherwise, it saves the workbook and returns NULL.
