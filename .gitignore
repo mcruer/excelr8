@@ -4,3 +4,7 @@
 .httr-oauth
 .DS_Store
 .quarto
+
+# Large data files (use zip for sharing)
+*.csv
+!full_period_prices.csv
