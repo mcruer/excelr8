@@ -1,23 +1,15 @@
-# Install packages if needed (run once)
-# install.packages("quantmod")
+# install.packages(c("quantmod", "purrr"))
 
 library(quantmod)
+library(purrr)
 
-# Fetch daily data for VIXY and DUST (last 30 days)
-symbols <- c("VIXY", "DUST")
-all_data <- data.frame()
+fetch_symbol <- function(sym, from_date, to_date) {
+  cat(sym, "- Fetching...\n")
 
-for (sym in symbols) {
-  cat("\n", paste(rep("=", 60), collapse = ""), "\n")
-  cat(sym, "- Daily Pricing Data\n")
-  cat(paste(rep("=", 60), collapse = ""), "\n\n")
-
-  # Download data from Yahoo Finance
-  getSymbols(sym, src = "yahoo", from = Sys.Date() - 30, to = Sys.Date())
-
-  # Get the data and convert to data frame
+  getSymbols(sym, src = "yahoo", from = from_date, to = to_date, auto.assign = TRUE)
   data <- get(sym)
-  df <- data.frame(
+
+  data.frame(
     Symbol = sym,
     Date = index(data),
     Open = as.numeric(Op(data)),
@@ -26,14 +18,24 @@ for (sym in symbols) {
     Close = as.numeric(Cl(data)),
     Volume = as.numeric(Vo(data))
   )
-
-  print(df, row.names = FALSE)
-  all_data <- rbind(all_data, df)
 }
 
-# Save combined data to CSV
-output_file <- "pricing_data.csv"
-write.csv(all_data, output_file, row.names = FALSE)
-cat("\n", paste(rep("=", 60), collapse = ""), "\n")
-cat("Data saved to:", output_file, "\n")
-cat("Total rows:", nrow(all_data), "\n")
+get_pricing_data <- function(symbols = c("VIXY", "DUST"),
+                              days_back = 30,
+                              output_file = "pricing_data.csv") {
+
+  from_date <- Sys.Date() - days_back
+  to_date <- Sys.Date()
+
+  all_data <- symbols |>
+    map(\(sym) fetch_symbol(sym, from_date, to_date)) |>
+    list_rbind()
+
+  write.csv(all_data, output_file, row.names = FALSE)
+  cat("\nSaved", nrow(all_data), "rows to", output_file, "\n")
+
+  invisible(all_data)
+}
+
+# Run with defaults (or customize)
+get_pricing_data()
