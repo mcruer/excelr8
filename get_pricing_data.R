@@ -6,8 +6,9 @@ library(purrr)
 fetch_symbol <- function(sym, from_date, to_date) {
   cat(sym, "- Fetching...\n")
 
-  getSymbols(sym, src = "yahoo", from = from_date, to = to_date, auto.assign = TRUE)
-  data <- get(sym)
+  # getSymbols returns the actual object name (^VIX becomes VIX)
+  obj_name <- getSymbols(sym, src = "yahoo", from = from_date, to = to_date, auto.assign = TRUE)
+  data <- get(obj_name)
 
   data.frame(
     Symbol = sym,
