@@ -10,6 +10,7 @@ excelr8(
   formatting.template.path = NULL,
   wb = NULL,
   output.file.name = NULL,
+  unique_identifier = NULL,
   column.names = FALSE,
   messages_first_data_row = NULL
 )
@@ -24,6 +25,10 @@ excelr8(
 \item{wb}{Workbook object from openxlsx. Default is NULL.}
 
 \item{output.file.name}{Character string specifying the name of the output Excel file. Default is NULL.}
+
+\item{unique_identifier}{This is necessary for use of the comments function.
+Provide a unique identifier associated with the data to apply automatic comments to.
+Default is NULL. If Null, the comments functionality is disabled.}
 
 \item{column.names}{Logical indicating whether to include column names. Default is FALSE.}
 

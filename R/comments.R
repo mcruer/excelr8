@@ -1,6 +1,8 @@
 generate_messages_df <- function (df,
                                   workbook_template_path,
-                                  first_data_row = NULL) {
+                                  unique_identifier,
+                                  first_data_row = NULL
+                                  ) {
 
   codify <- function(df, text) {
     eval(parse(text = paste0("df %>% ", text)))
@@ -51,13 +53,13 @@ generate_messages_df <- function (df,
   row_location <- df %>%
     gplyr::add_index(col_name = row_number) %>%
     gplyr::quickm(row_number, magrittr::add, data_start_row - 1) %>%
-    dplyr::select(project_id, row_number)
+    dplyr::select({{unique_identifier}}, row_number)
 
   messages <- df %>%
     listful::build(expressions, codify) %>%
-    dplyr::select(project_id, dplyr::starts_with("error_")) %>%
+    dplyr::select({{unique_identifier}}, dplyr::starts_with("error_")) %>%
     purrr::modify_if(is.logical, gplyr::na_to_F) %>%
-    tidyr::pivot_longer(cols = -project_id) %>%
+    tidyr::pivot_longer(cols = -{{unique_identifier}}) %>%
     dplyr::filter (value) %>%
     dplyr::left_join(error_messages) %>%
     gplyr::quickm(name, stringr::str_remove, "error_") %>%
@@ -65,13 +67,13 @@ generate_messages_df <- function (df,
                     into = c("column_name", "index"),
                     sep = "_N") %>%
     dplyr::select(-index, -value) %>%
-    dplyr::group_by(project_id, sheet, column_name, author) %>%
+    dplyr::group_by({{unique_identifier}}, sheet, column_name, author) %>%
     gplyr::quicks(message, stringr::str_c, collapse = "; ") %>%
     dplyr::left_join(column_location) %>%
     dplyr::left_join(row_location) %>%
     dplyr::rename(col = column_number, row = row_number) %>%
     dplyr::ungroup() %>%
-    dplyr::select (-column_name, -project_id)
+    dplyr::select (-column_name, -{{unique_identifier}})
 
   messages
 

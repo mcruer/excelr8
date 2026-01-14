@@ -10,6 +10,9 @@ utils::globalVariables(c("default", "sheet.number"))
 #' @param formatting.template.path Character string specifying the path to the Excel file serving as the formatting template. Default is NULL.
 #' @param wb Workbook object from openxlsx. Default is NULL.
 #' @param output.file.name Character string specifying the name of the output Excel file. Default is NULL.
+#' @param unique_identifier This is necessary for use of the comments function.
+#' Provide a unique identifier associated with the data to apply automatic comments to.
+#' Default is NULL. If Null, the comments functionality is disabled.
 #' @param column.names Logical indicating whether to include column names. Default is FALSE.
 #' @param messages_first_data_row An intiger indicating which rows the messages start at. Default is NULL.
 #' If NULL, the program looks to the Cell Info tab of the workbook template to infer a logical value.
@@ -28,6 +31,7 @@ excelr8 <- function(df,
                     formatting.template.path = NULL,
                     wb=NULL,
                     output.file.name = NULL,
+                    unique_identifier = NULL,
                     column.names = FALSE,
                     messages_first_data_row = NULL
 ) {
@@ -57,13 +61,13 @@ excelr8 <- function(df,
   workbook.template <- readxl::read_excel(data.template.path, sheet = 3) %>%
     apply.default()
 
-  if (!formatting.template.included) {
-    sheet.count <- max (
-      cell.template %>% dplyr::pull(sheet.number) %>% max(),
-      sheet.template %>% dplyr::pull(sheet.number) %>% max()
-    )
-    purrr::walk (1:sheet.count, ~addWorksheet(wb, stringr::str_c("Sheet", .x)))
-  }
+  # if (!formatting.template.included) {
+  #   sheet.count <- max (
+  #     cell.template %>% dplyr::pull(sheet.number) %>% max(),
+  #     sheet.template %>% dplyr::pull(sheet.number) %>% max()
+  #   )
+  #   purrr::walk (1:sheet.count, ~addWorksheet(wb, stringr::str_c("Sheet", .x)))
+  # }
 
 
   #Uses Cell Template -------------
@@ -80,14 +84,20 @@ excelr8 <- function(df,
   #Requires workbook template -------------
   purrr::pwalk(workbook.template, apply_workbook_template, wb = wb)
 
-  comments <- generate_messages_df(df,
-                                   data.template.path,
-                                   first_data_row = messages_first_data_row)
+  unique_identifier_quo <- rlang::enquo(unique_identifier) # Capture the unique identifier as a quosure
+  if(!rlang::quo_is_null(unique_identifier_quo)) {
+    comments <- generate_messages_df(df,
+                                     data.template.path,
+                                     unique_identifier = {{unique_identifier}},
+                                     first_data_row = messages_first_data_row)
+
+    wb <- wb %>%
+      listful::pbuild (comments, write_comment)
+  }
 
   conditional_formatting <- readxl::read_excel(data.template.path, sheet = "Conditional Formatting", skip = 1)
 
   wb <- wb %>%
-    listful::pbuild (comments, write_comment) %>%
     listful::pbuild(conditional_formatting, add_conditional_formatting)
 
   #Final Steps -----
