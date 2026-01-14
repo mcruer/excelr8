@@ -38,4 +38,8 @@ get_pricing_data <- function(symbols = c("VIXY", "DUST"),
 }
 
 # Run with defaults (or customize)
-get_pricing_data()
+get_pricing_data(
+  symbols = c("VIXY", "DUST"),
+  days_back = 6000,
+  output_file = "two_year_prices.csv"
+)
