@@ -5,6 +5,7 @@ library(quantmod)
 
 # Fetch daily data for VIXY and DUST (last 30 days)
 symbols <- c("VIXY", "DUST")
+all_data <- data.frame()
 
 for (sym in symbols) {
   cat("\n", paste(rep("=", 60), collapse = ""), "\n")
@@ -17,6 +18,7 @@ for (sym in symbols) {
   # Get the data and convert to data frame
   data <- get(sym)
   df <- data.frame(
+    Symbol = sym,
     Date = index(data),
     Open = as.numeric(Op(data)),
     High = as.numeric(Hi(data)),
@@ -26,8 +28,12 @@ for (sym in symbols) {
   )
 
   print(df, row.names = FALSE)
+  all_data <- rbind(all_data, df)
 }
 
-# Optional: Save to CSV files
-# write.csv(VIXY, "vixy_prices.csv")
-# write.csv(DUST, "dust_prices.csv")
+# Save combined data to CSV
+output_file <- "pricing_data.csv"
+write.csv(all_data, output_file, row.names = FALSE)
+cat("\n", paste(rep("=", 60), collapse = ""), "\n")
+cat("Data saved to:", output_file, "\n")
+cat("Total rows:", nrow(all_data), "\n")
