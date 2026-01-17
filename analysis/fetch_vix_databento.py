@@ -71,7 +71,7 @@ def generate_vix_option_symbols(start_date, end_date):
 
 
 def fetch_vix_options():
-    """Fetch VIX options data from Databento"""
+    """Fetch VIX options data from Databento - stops after first successful method"""
     import databento as db
 
     print("="*60)
@@ -82,15 +82,13 @@ def fetch_vix_options():
 
     client = db.Historical(API_KEY)
 
-    # First, explore what's available
+    # First, explore what's available (this is just metadata, low cost)
     print("\nExploring available datasets...")
     datasets = client.metadata.list_datasets()
 
     options_datasets = [ds for ds in datasets
                         if any(x in ds.upper() for x in ['CBOE', 'OPRA', 'OPT'])]
     print(f"Options-related datasets: {options_datasets}")
-
-    all_data = []
 
     # Method 1: Try using parent symbol (underlying) with stype_in
     print("\nMethod 1: Trying parent symbol approach...")
@@ -105,99 +103,73 @@ def fetch_vix_options():
         )
         df = data.to_df()
         if len(df) > 0:
-            all_data.append(df)
-            print(f"  Success! Got {len(df):,} rows")
+            print(f"  Success! Got {len(df):,} rows - DONE")
+            return df  # Return immediately, don't try other methods
     except Exception as e:
-        print(f"  Parent symbol approach failed: {e}")
+        print(f"  Failed: {e}")
 
-    # Method 2: Try with specific OCC-format symbols
-    if not all_data:
-        print("\nMethod 2: Trying specific OCC symbols...")
-        try:
-            # Generate a batch of VIX option symbols
-            symbols = generate_vix_option_symbols(START_DATE, END_DATE)
-            print(f"  Generated {len(symbols)} potential symbols")
-            print(f"  Sample: {symbols[:3]}")
+    # Method 2: Try with specific OCC-format symbols (only if Method 1 failed)
+    print("\nMethod 2: Trying specific OCC symbols...")
+    try:
+        symbols = generate_vix_option_symbols(START_DATE, END_DATE)
+        print(f"  Generated {len(symbols)} potential symbols")
+        print(f"  Sample: {symbols[:3]}")
 
-            # Fetch in batches (API may have limits)
-            batch_size = 100
-            for i in range(0, min(len(symbols), 500), batch_size):
-                batch = symbols[i:i+batch_size]
-                try:
-                    data = client.timeseries.get_range(
-                        dataset="OPRA.PILLAR",
-                        symbols=batch,
-                        schema="ohlcv-1d",
-                        start=START_DATE,
-                        end=END_DATE,
-                    )
-                    df = data.to_df()
-                    if len(df) > 0:
-                        all_data.append(df)
-                        print(f"  Batch {i//batch_size + 1}: Got {len(df):,} rows")
-                except Exception as e:
-                    print(f"  Batch {i//batch_size + 1} failed: {e}")
-        except Exception as e:
-            print(f"  OCC symbols approach failed: {e}")
+        # Try just first batch to test
+        data = client.timeseries.get_range(
+            dataset="OPRA.PILLAR",
+            symbols=symbols[:100],  # First 100 only
+            schema="ohlcv-1d",
+            start=START_DATE,
+            end=END_DATE,
+        )
+        df = data.to_df()
+        if len(df) > 0:
+            print(f"  Success! Got {len(df):,} rows - DONE")
+            return df  # Return immediately
+    except Exception as e:
+        print(f"  Failed: {e}")
 
-    # Method 3: Try instrument definitions to find valid symbols
-    if not all_data:
-        print("\nMethod 3: Trying instrument definitions...")
-        try:
-            # Get instrument definitions for a recent date
-            definitions = client.metadata.get_instrument_definitions(
-                dataset="OPRA.PILLAR",
-                symbols=["VIX*"],
-                stype_in="raw_symbol",
-                start=START_DATE,
-                end=END_DATE,
-            )
-            if definitions:
-                print(f"  Found {len(definitions)} instrument definitions")
-                # Extract symbols and try to fetch
-                found_symbols = [d.raw_symbol for d in definitions[:100]]
-                print(f"  Sample symbols: {found_symbols[:5]}")
+    # Method 3: Try different schema (only if Methods 1 & 2 failed)
+    print("\nMethod 3: Trying 'trades' schema with parent symbol...")
+    try:
+        data = client.timeseries.get_range(
+            dataset="OPRA.PILLAR",
+            symbols=["VIX"],
+            stype_in="parent",
+            schema="trades",
+            start=START_DATE,
+            end=END_DATE,
+            limit=100000,  # Limit to control cost
+        )
+        df = data.to_df()
+        if len(df) > 0:
+            print(f"  Success! Got {len(df):,} rows - DONE")
+            return df
+    except Exception as e:
+        print(f"  Failed: {e}")
 
-                data = client.timeseries.get_range(
-                    dataset="OPRA.PILLAR",
-                    symbols=found_symbols,
-                    schema="ohlcv-1d",
-                    start=START_DATE,
-                    end=END_DATE,
-                )
-                df = data.to_df()
-                if len(df) > 0:
-                    all_data.append(df)
-                    print(f"  Success! Got {len(df):,} rows")
-        except Exception as e:
-            print(f"  Instrument definitions approach failed: {e}")
+    # Method 4: Try tbbo schema (only if all above failed)
+    print("\nMethod 4: Trying 'tbbo' schema...")
+    try:
+        data = client.timeseries.get_range(
+            dataset="OPRA.PILLAR",
+            symbols=["VIX"],
+            stype_in="parent",
+            schema="tbbo",
+            start=START_DATE,
+            end=END_DATE,
+            limit=100000,
+        )
+        df = data.to_df()
+        if len(df) > 0:
+            print(f"  Success! Got {len(df):,} rows - DONE")
+            return df
+    except Exception as e:
+        print(f"  Failed: {e}")
 
-    # Method 4: Try different schemas (maybe ohlcv-1d isn't available)
-    if not all_data:
-        print("\nMethod 4: Trying different schemas...")
-        for schema in ["trades", "tbbo", "mbp-1"]:
-            try:
-                data = client.timeseries.get_range(
-                    dataset="OPRA.PILLAR",
-                    symbols=["VIX"],
-                    stype_in="parent",
-                    schema=schema,
-                    start=START_DATE,
-                    end=END_DATE,
-                    limit=10000,  # Limit for testing
-                )
-                df = data.to_df()
-                if len(df) > 0:
-                    all_data.append(df)
-                    print(f"  Schema '{schema}': Got {len(df):,} rows")
-                    break
-            except Exception as e:
-                print(f"  Schema '{schema}' failed: {e}")
-
-    if all_data:
-        combined = pd.concat(all_data, ignore_index=True)
-        return combined
-
+    # All methods failed
+    print("\nAll methods failed to retrieve data.")
     return None
 
 
