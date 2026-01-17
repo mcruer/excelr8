@@ -50,16 +50,47 @@ def load_data(file_path):
 # STRATEGY FUNCTIONS
 # =============================================================================
 
-def get_settlement_vix(df, expiration):
-    """Get VIX at expiration"""
-    d = df[df['quote_date'] == expiration]
-    if len(d) > 0:
-        return d['underlying_bid_eod'].iloc[0]
-    prior = df[df['quote_date'] < expiration]['quote_date'].max()
-    if not pd.isna(prior):
-        d = df[df['quote_date'] == prior]
-        return d['underlying_bid_eod'].iloc[0] if len(d) > 0 else None
-    return None
+def get_settlement_value(df, expiration, short_strike, long_strike):
+    """
+    Get settlement value for the spread at expiration.
+    Since we don't have VIX spot data, derive it from option prices.
+    At expiration, option price ≈ intrinsic value.
+    """
+    # Try multiple days around expiration (options often stop trading before expiration day)
+    for days_back in range(0, 5):
+        check_date = expiration - pd.Timedelta(days=days_back)
+        exp_data = df[df['quote_date'] == check_date]
+
+        if len(exp_data) == 0:
+            continue
+
+        # Get short and long call prices - MUST filter by expiration!
+        short_call = exp_data[(exp_data['option_type'] == 'C') &
+                              (exp_data['strike'] == short_strike) &
+                              (exp_data['expiration'] == expiration)]
+        long_call = exp_data[(exp_data['option_type'] == 'C') &
+                             (exp_data['strike'] == long_strike) &
+                             (exp_data['expiration'] == expiration)]
+
+        if len(short_call) > 0 and len(long_call) > 0:
+            break
+    else:
+        return None, None
+
+    if len(short_call) == 0 or len(long_call) == 0:
+        return None, None
+
+    # Use close price as intrinsic value proxy
+    short_val = short_call['close'].iloc[0] if 'close' in short_call.columns else short_call['bid_eod'].iloc[0]
+    long_val = long_call['close'].iloc[0] if 'close' in long_call.columns else long_call['bid_eod'].iloc[0]
+
+    # Settlement cost is what we owe (short) minus what we receive (long)
+    settlement = short_val - long_val
+
+    # Estimate VIX from short call intrinsic value (optional, for reporting)
+    estimated_vix = short_strike + short_val if short_val > 0.5 else short_strike - 2
+
+    return settlement, estimated_vix
 
 
 def find_spread(df_day, short_strike, long_strike, dte_min, dte_max):
@@ -135,11 +166,12 @@ def run_staggered_absolute(df, short_strike=35, long_strike=45, dte_min=60, dte_
         positions_to_close = []
         for i, pos in enumerate(open_positions):
             if date >= pos['expiration']:
-                vix_exp = get_settlement_vix(df, pos['expiration'])
-                if vix_exp:
-                    short_intr = max(0, vix_exp - pos['short_strike'])
-                    long_intr = max(0, vix_exp - pos['long_strike'])
-                    settlement = min(short_intr - long_intr, pos['spread_width'])
+                settlement, vix_exp = get_settlement_value(
+                    df, pos['expiration'], pos['short_strike'], pos['long_strike']
+                )
+                if settlement is not None:
+                    # Cap settlement at spread width
+                    settlement = min(max(settlement, 0), pos['spread_width'])
                     pnl_per = (pos['credit'] - settlement) * 100
                     total_pnl = pnl_per * pos['contracts']
 
@@ -148,7 +180,7 @@ def run_staggered_absolute(df, short_strike=35, long_strike=45, dte_min=60, dte_
                     closed_trades.append({
                         **pos,
                         'exit_date': pos['expiration'],
-                        'vix_exp': vix_exp,
+                        'vix_exp': vix_exp if vix_exp else 0,
                         'pnl_per': pnl_per,
                         'total_pnl': total_pnl,
                         'capital_after': capital,
@@ -289,8 +321,9 @@ def check_data_quality(df):
     print("DATA QUALITY CHECK")
     print("="*60)
 
+    # Core required columns (underlying_bid_eod is optional now)
     required_cols = ['quote_date', 'expiration', 'strike', 'option_type',
-                     'bid_eod', 'ask_eod', 'underlying_bid_eod']
+                     'bid_eod', 'ask_eod']
 
     missing = [c for c in required_cols if c not in df.columns]
     if missing:
@@ -304,8 +337,16 @@ def check_data_quality(df):
     print(f"\nData summary:")
     print(f"  Dates: {df['quote_date'].min()} to {df['quote_date'].max()}")
     print(f"  Strikes: {df['strike'].min()} to {df['strike'].max()}")
-    print(f"  VIX range: {df['underlying_bid_eod'].min():.1f} to {df['underlying_bid_eod'].max():.1f}")
     print(f"  Option types: {df['option_type'].unique()}")
+
+    # Check VIX data availability
+    if 'underlying_bid_eod' in df.columns:
+        vix_valid = df['underlying_bid_eod'].notna().sum()
+        print(f"  VIX data: {vix_valid:,} / {len(df):,} rows")
+        if vix_valid == 0:
+            print("  Note: No VIX spot data - will derive settlement from option prices")
+    else:
+        print("  Note: No VIX column - will derive settlement from option prices")
 
     # Check for 35 and 45 strikes
     has_35 = 35 in df['strike'].values
