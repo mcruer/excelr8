@@ -70,8 +70,47 @@ def generate_vix_option_symbols(start_date, end_date):
     return symbols
 
 
+def fetch_vix_spot(client):
+    """Fetch VIX spot/index data for underlying prices"""
+    print("\nFetching VIX spot data...")
+    try:
+        # Try CBOE dataset for VIX index
+        data = client.timeseries.get_range(
+            dataset="CBOE.STREAMING",
+            symbols=["VIX"],
+            schema="ohlcv-1d",
+            start=START_DATE,
+            end=END_DATE,
+        )
+        df = data.to_df()
+        if len(df) > 0:
+            print(f"  Got {len(df):,} VIX spot rows")
+            return df
+    except Exception as e:
+        print(f"  CBOE.STREAMING failed: {e}")
+
+    # Alternative: try different dataset
+    try:
+        data = client.timeseries.get_range(
+            dataset="DBEQ.BASIC",
+            symbols=["VIX"],
+            schema="ohlcv-1d",
+            start=START_DATE,
+            end=END_DATE,
+        )
+        df = data.to_df()
+        if len(df) > 0:
+            print(f"  Got {len(df):,} VIX spot rows from DBEQ")
+            return df
+    except Exception as e:
+        print(f"  DBEQ.BASIC failed: {e}")
+
+    print("  Could not fetch VIX spot - will use placeholder")
+    return None
+
+
 def fetch_vix_options():
-    """Fetch VIX options data from Databento - stops after first successful method"""
+    """Fetch VIX options data from Databento using VIX.OPT parent symbol"""
     import databento as db
 
     print("="*60)
@@ -82,98 +121,35 @@ def fetch_vix_options():
 
     client = db.Historical(API_KEY)
 
-    # First, explore what's available (this is just metadata, low cost)
-    print("\nExploring available datasets...")
-    datasets = client.metadata.list_datasets()
-
-    options_datasets = [ds for ds in datasets
-                        if any(x in ds.upper() for x in ['CBOE', 'OPRA', 'OPT'])]
-    print(f"Options-related datasets: {options_datasets}")
-
-    # Method 1: Try using parent symbol (underlying) with stype_in
-    print("\nMethod 1: Trying parent symbol approach...")
+    # Use correct parent symbol format: VIX.OPT for VIX options
+    # Per error message: expected format '[ROOT].SPOT', '[ROOT].FUT', or '[ROOT].OPT'
+    print("\nFetching VIX options using 'VIX.OPT' parent symbol...")
     try:
         data = client.timeseries.get_range(
             dataset="OPRA.PILLAR",
-            symbols=["VIX"],  # Parent/underlying symbol
-            stype_in="parent",  # Search by underlying
+            symbols=["VIX.OPT"],  # Correct format for options
+            stype_in="parent",
             schema="ohlcv-1d",
             start=START_DATE,
             end=END_DATE,
         )
         df = data.to_df()
         if len(df) > 0:
-            print(f"  Success! Got {len(df):,} rows - DONE")
-            return df  # Return immediately, don't try other methods
+            print(f"  Success! Got {len(df):,} rows")
+
+            # Also try to get VIX spot for underlying prices
+            vix_spot = fetch_vix_spot(client)
+
+            return df, vix_spot
+        else:
+            print("  No data returned")
     except Exception as e:
         print(f"  Failed: {e}")
 
-    # Method 2: Try with specific OCC-format symbols (only if Method 1 failed)
-    print("\nMethod 2: Trying specific OCC symbols...")
-    try:
-        symbols = generate_vix_option_symbols(START_DATE, END_DATE)
-        print(f"  Generated {len(symbols)} potential symbols")
-        print(f"  Sample: {symbols[:3]}")
-
-        # Try just first batch to test
-        data = client.timeseries.get_range(
-            dataset="OPRA.PILLAR",
-            symbols=symbols[:100],  # First 100 only
-            schema="ohlcv-1d",
-            start=START_DATE,
-            end=END_DATE,
-        )
-        df = data.to_df()
-        if len(df) > 0:
-            print(f"  Success! Got {len(df):,} rows - DONE")
-            return df  # Return immediately
-    except Exception as e:
-        print(f"  Failed: {e}")
-
-    # Method 3: Try different schema (only if Methods 1 & 2 failed)
-    print("\nMethod 3: Trying 'trades' schema with parent symbol...")
-    try:
-        data = client.timeseries.get_range(
-            dataset="OPRA.PILLAR",
-            symbols=["VIX"],
-            stype_in="parent",
-            schema="trades",
-            start=START_DATE,
-            end=END_DATE,
-            limit=100000,  # Limit to control cost
-        )
-        df = data.to_df()
-        if len(df) > 0:
-            print(f"  Success! Got {len(df):,} rows - DONE")
-            return df
-    except Exception as e:
-        print(f"  Failed: {e}")
-
-    # Method 4: Try tbbo schema (only if all above failed)
-    print("\nMethod 4: Trying 'tbbo' schema...")
-    try:
-        data = client.timeseries.get_range(
-            dataset="OPRA.PILLAR",
-            symbols=["VIX"],
-            stype_in="parent",
-            schema="tbbo",
-            start=START_DATE,
-            end=END_DATE,
-            limit=100000,
-        )
-        df = data.to_df()
-        if len(df) > 0:
-            print(f"  Success! Got {len(df):,} rows - DONE")
-            return df
-    except Exception as e:
-        print(f"  Failed: {e}")
-
-    # All methods failed
-    print("\nAll methods failed to retrieve data.")
-    return None
+    return None, None
 
 
-def transform_data(df):
+def transform_data(df, vix_spot=None):
     """
     Transform Databento data to match the expected format:
     - quote_date: date of the quote
@@ -190,33 +166,30 @@ def transform_data(df):
     print(f"\nSample data:")
     print(df.head())
 
-    # The transformation depends on Databento's output format
-    # This is a template - adjust based on actual data
-
     transformed = df.copy()
 
-    # Databento typically has these columns:
-    # ts_event, symbol, open, high, low, close, volume
+    # Reset index to get ts_event as a column
+    if transformed.index.name == 'ts_event' or 'ts_event' not in transformed.columns:
+        transformed = transformed.reset_index()
 
     # Parse option symbol to extract strike, expiration, type
-    # VIX option symbols look like: VIX 240119C00035000
-    # Format: VIX YYMMDD[C/P]STRIKE
+    # VIX option symbols look like: VIX   240119C00035000
+    # Format: ROOT(6) + YYMMDD + C/P + STRIKE(8)
 
     if 'symbol' in transformed.columns:
         def parse_symbol(sym):
             try:
-                # Extract components from symbol
-                # This parsing depends on Databento's symbol format
-                parts = str(sym).split()
-                if len(parts) >= 2:
-                    opt_code = parts[1] if len(parts) > 1 else parts[0]
-                    # Parse YYMMDD + C/P + strike
-                    if len(opt_code) >= 15:
-                        exp_str = opt_code[:6]
-                        opt_type = opt_code[6]
-                        strike = float(opt_code[7:]) / 1000
-                        exp_date = pd.to_datetime('20' + exp_str, format='%Y%m%d')
-                        return pd.Series([exp_date, opt_type, strike])
+                sym = str(sym).strip()
+                # Find the date/type/strike portion after root
+                # Look for 6 digits followed by C or P
+                import re
+                match = re.search(r'(\d{6})([CP])(\d{8})', sym)
+                if match:
+                    exp_str = match.group(1)
+                    opt_type = match.group(2)
+                    strike = float(match.group(3)) / 1000
+                    exp_date = pd.to_datetime('20' + exp_str, format='%Y%m%d')
+                    return pd.Series([exp_date, opt_type, strike])
                 return pd.Series([None, None, None])
             except:
                 return pd.Series([None, None, None])
@@ -226,23 +199,41 @@ def transform_data(df):
         transformed['option_type'] = parsed[1]
         transformed['strike'] = parsed[2]
 
-    # Rename columns to match expected format
-    column_mapping = {
-        'ts_event': 'quote_date',
-        'close': 'bid_eod',  # Use close as proxy if no bid/ask
-    }
+    # Extract quote_date from ts_event
+    if 'ts_event' in transformed.columns:
+        transformed['quote_date'] = pd.to_datetime(transformed['ts_event']).dt.date
+        transformed['quote_date'] = pd.to_datetime(transformed['quote_date'])
 
-    for old, new in column_mapping.items():
-        if old in transformed.columns:
-            transformed[new] = transformed[old]
+    # Use close as mid-price estimate, then derive bid/ask
+    # Typical VIX option spread is ~$0.10-0.30 depending on liquidity
+    if 'close' in transformed.columns:
+        transformed['mid_price'] = transformed['close']
+        # Estimate 5% bid-ask spread (conservative for VIX options)
+        transformed['bid_eod'] = transformed['mid_price'] * 0.975
+        transformed['ask_eod'] = transformed['mid_price'] * 1.025
 
-    # Add ask_eod as bid + spread estimate if not present
-    if 'ask_eod' not in transformed.columns and 'bid_eod' in transformed.columns:
-        transformed['ask_eod'] = transformed['bid_eod'] * 1.1  # 10% spread estimate
+    # Merge VIX spot data for underlying prices
+    if vix_spot is not None and len(vix_spot) > 0:
+        print("\nMerging VIX spot data...")
+        vix_spot = vix_spot.reset_index()
+        if 'ts_event' in vix_spot.columns:
+            vix_spot['quote_date'] = pd.to_datetime(vix_spot['ts_event']).dt.date
+            vix_spot['quote_date'] = pd.to_datetime(vix_spot['quote_date'])
+        vix_spot = vix_spot[['quote_date', 'close']].rename(columns={'close': 'underlying_bid_eod'})
+        vix_spot = vix_spot.drop_duplicates('quote_date')
+        transformed = transformed.merge(vix_spot, on='quote_date', how='left')
+        print(f"  Matched {transformed['underlying_bid_eod'].notna().sum()} rows with VIX spot")
+    else:
+        # No VIX spot data - leave as NaN (test script will need to handle)
+        transformed['underlying_bid_eod'] = None
+        print("  No VIX spot data - underlying_bid_eod will be None")
 
-    # Add underlying (VIX) - may need separate fetch
-    if 'underlying_bid_eod' not in transformed.columns:
-        transformed['underlying_bid_eod'] = 20  # Placeholder - needs real VIX data
+    # Drop rows where we couldn't parse the option
+    before = len(transformed)
+    transformed = transformed.dropna(subset=['expiration', 'strike', 'option_type'])
+    after = len(transformed)
+    if before != after:
+        print(f"  Dropped {before - after} rows with unparseable symbols")
 
     print(f"\nTransformed columns: {transformed.columns.tolist()}")
     print(f"Transformed shape: {transformed.shape}")
@@ -274,7 +265,7 @@ def save_and_zip(df):
 
 
 def main():
-    df = fetch_vix_options()
+    df, vix_spot = fetch_vix_options()
 
     if df is None or len(df) == 0:
         print("\n" + "="*60)
@@ -295,10 +286,12 @@ You may need to:
 """)
         return
 
-    print(f"\nSuccessfully fetched {len(df):,} rows")
+    print(f"\nSuccessfully fetched {len(df):,} option rows")
+    if vix_spot is not None:
+        print(f"Also fetched {len(vix_spot):,} VIX spot rows")
 
     # Transform to expected format
-    transformed = transform_data(df)
+    transformed = transform_data(df, vix_spot)
 
     # Save and zip
     save_and_zip(transformed)
