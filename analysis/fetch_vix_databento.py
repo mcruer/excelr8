@@ -19,7 +19,7 @@ from datetime import datetime, timedelta
 # CONFIGURATION
 # =============================================================================
 
-API_KEY = "db-x5MB8c3vCxjin5s8CeARFrWAEBenb"
+API_KEY = open(r"C:\Users\McRuersG\OneDrive - Government of Ontario\Desktop\Temp\All Plain Interface.txt").read().strip()
 
 # 3 years of data
 END_DATE = datetime.now().strftime("%Y-%m-%d")
