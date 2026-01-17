@@ -14,6 +14,7 @@ import os
 import zipfile
 import pandas as pd
 from datetime import datetime, timedelta
+from dateutil.relativedelta import relativedelta
 
 # =============================================================================
 # CONFIGURATION
@@ -31,6 +32,43 @@ OUTPUT_ZIP = "vix_options_databento.csv.zip"
 # =============================================================================
 # FETCH DATA
 # =============================================================================
+
+def generate_vix_option_symbols(start_date, end_date):
+    """
+    Generate OCC-format VIX option symbols for common strikes.
+    OCC format: VIX   YYMMDDCSSSSSSSS (6-char root, date, C/P, 8-digit strike*1000)
+    """
+    symbols = []
+
+    # Parse dates
+    start = datetime.strptime(start_date, "%Y-%m-%d")
+    end = datetime.strptime(end_date, "%Y-%m-%d")
+
+    # Generate monthly expirations (3rd Wednesday typically, but we'll approximate)
+    current = start
+    while current <= end + relativedelta(months=6):  # Include some future expirations
+        # VIX options expire on Wednesday, roughly mid-month
+        # Use 15th as approximation, adjust to nearest Wednesday
+        exp_date = current.replace(day=15)
+
+        # Format as YYMMDD
+        exp_str = exp_date.strftime("%y%m%d")
+
+        # Common VIX strikes: 15, 20, 25, 30, 35, 40, 45, 50
+        for strike in [15, 20, 25, 30, 35, 40, 45, 50]:
+            # Strike is multiplied by 1000 and zero-padded to 8 digits
+            strike_str = f"{strike * 1000:08d}"
+
+            # Generate call and put symbols
+            # OCC format: ROOT(6) + YYMMDD + C/P + STRIKE(8)
+            for opt_type in ['C', 'P']:
+                symbol = f"VIX   {exp_str}{opt_type}{strike_str}"
+                symbols.append(symbol)
+
+        current += relativedelta(months=1)
+
+    return symbols
+
 
 def fetch_vix_options():
     """Fetch VIX options data from Databento"""
@@ -52,17 +90,15 @@ def fetch_vix_options():
                         if any(x in ds.upper() for x in ['CBOE', 'OPRA', 'OPT'])]
     print(f"Options-related datasets: {options_datasets}")
 
-    # Try to fetch VIX options from OPRA
-    print("\nAttempting to fetch VIX options...")
-
     all_data = []
 
-    # Try OPRA.PILLAR first (main US options feed)
+    # Method 1: Try using parent symbol (underlying) with stype_in
+    print("\nMethod 1: Trying parent symbol approach...")
     try:
-        print("Trying OPRA.PILLAR...")
         data = client.timeseries.get_range(
             dataset="OPRA.PILLAR",
-            symbols=["VIX*.C*", "VIX*.P*"],  # VIX calls and puts
+            symbols=["VIX"],  # Parent/underlying symbol
+            stype_in="parent",  # Search by underlying
             schema="ohlcv-1d",
             start=START_DATE,
             end=END_DATE,
@@ -70,44 +106,27 @@ def fetch_vix_options():
         df = data.to_df()
         if len(df) > 0:
             all_data.append(df)
-            print(f"  Got {len(df):,} rows from OPRA.PILLAR")
+            print(f"  Success! Got {len(df):,} rows")
     except Exception as e:
-        print(f"  OPRA.PILLAR failed: {e}")
+        print(f"  Parent symbol approach failed: {e}")
 
-    # Try CBOE datasets
-    for ds in [d for d in datasets if 'CBOE' in d.upper()]:
-        try:
-            print(f"Trying {ds}...")
-            data = client.timeseries.get_range(
-                dataset=ds,
-                symbols=["VIX*", "VX*"],
-                schema="ohlcv-1d",
-                start=START_DATE,
-                end=END_DATE,
-            )
-            df = data.to_df()
-            if len(df) > 0:
-                all_data.append(df)
-                print(f"  Got {len(df):,} rows from {ds}")
-        except Exception as e:
-            print(f"  {ds} failed: {e}")
-
+    # Method 2: Try with specific OCC-format symbols
     if not all_data:
-        print("\nNo data fetched. Trying alternative approach...")
-
-        # Try to list specific VIX option symbols
+        print("\nMethod 2: Trying specific OCC symbols...")
         try:
-            for ds in options_datasets[:3]:
-                symbols = client.metadata.list_symbols(dataset=ds, symbol="VIX*")
-                if symbols:
-                    print(f"\nFound VIX symbols in {ds}:")
-                    for s in symbols[:20]:
-                        print(f"  {s}")
+            # Generate a batch of VIX option symbols
+            symbols = generate_vix_option_symbols(START_DATE, END_DATE)
+            print(f"  Generated {len(symbols)} potential symbols")
+            print(f"  Sample: {symbols[:3]}")
 
-                    # Try to fetch with specific symbols
+            # Fetch in batches (API may have limits)
+            batch_size = 100
+            for i in range(0, min(len(symbols), 500), batch_size):
+                batch = symbols[i:i+batch_size]
+                try:
                     data = client.timeseries.get_range(
-                        dataset=ds,
-                        symbols=symbols[:100],  # First 100 symbols
+                        dataset="OPRA.PILLAR",
+                        symbols=batch,
                         schema="ohlcv-1d",
                         start=START_DATE,
                         end=END_DATE,
@@ -115,10 +134,65 @@ def fetch_vix_options():
                     df = data.to_df()
                     if len(df) > 0:
                         all_data.append(df)
-                        print(f"  Got {len(df):,} rows")
-                        break
+                        print(f"  Batch {i//batch_size + 1}: Got {len(df):,} rows")
+                except Exception as e:
+                    print(f"  Batch {i//batch_size + 1} failed: {e}")
         except Exception as e:
-            print(f"Alternative approach failed: {e}")
+            print(f"  OCC symbols approach failed: {e}")
+
+    # Method 3: Try instrument definitions to find valid symbols
+    if not all_data:
+        print("\nMethod 3: Trying instrument definitions...")
+        try:
+            # Get instrument definitions for a recent date
+            definitions = client.metadata.get_instrument_definitions(
+                dataset="OPRA.PILLAR",
+                symbols=["VIX*"],
+                stype_in="raw_symbol",
+                start=START_DATE,
+                end=END_DATE,
+            )
+            if definitions:
+                print(f"  Found {len(definitions)} instrument definitions")
+                # Extract symbols and try to fetch
+                found_symbols = [d.raw_symbol for d in definitions[:100]]
+                print(f"  Sample symbols: {found_symbols[:5]}")
+
+                data = client.timeseries.get_range(
+                    dataset="OPRA.PILLAR",
+                    symbols=found_symbols,
+                    schema="ohlcv-1d",
+                    start=START_DATE,
+                    end=END_DATE,
+                )
+                df = data.to_df()
+                if len(df) > 0:
+                    all_data.append(df)
+                    print(f"  Success! Got {len(df):,} rows")
+        except Exception as e:
+            print(f"  Instrument definitions approach failed: {e}")
+
+    # Method 4: Try different schemas (maybe ohlcv-1d isn't available)
+    if not all_data:
+        print("\nMethod 4: Trying different schemas...")
+        for schema in ["trades", "tbbo", "mbp-1"]:
+            try:
+                data = client.timeseries.get_range(
+                    dataset="OPRA.PILLAR",
+                    symbols=["VIX"],
+                    stype_in="parent",
+                    schema=schema,
+                    start=START_DATE,
+                    end=END_DATE,
+                    limit=10000,  # Limit for testing
+                )
+                df = data.to_df()
+                if len(df) > 0:
+                    all_data.append(df)
+                    print(f"  Schema '{schema}': Got {len(df):,} rows")
+                    break
+            except Exception as e:
+                print(f"  Schema '{schema}' failed: {e}")
 
     if all_data:
         combined = pd.concat(all_data, ignore_index=True)
