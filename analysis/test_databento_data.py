@@ -1,136 +1,53 @@
 #!/usr/bin/env python3
 """
-Fetch VIX options data from Databento and test the staggered absolute strategy.
+Test the staggered absolute strategy on Databento VIX options data.
+
+This script runs on the server side after user uploads vix_options_databento.csv.zip
 
 Usage:
-    pip install databento pandas numpy
-    python fetch_and_test_databento.py
-
-You'll need to set your Databento API key below or as an environment variable.
+    python test_databento_data.py [path_to_zip]
 """
 
-import os
+import sys
+import zipfile
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime
 
 # =============================================================================
-# CONFIGURATION
+# DATA LOADING
 # =============================================================================
 
-# Set your API key here or use environment variable DATABENTO_API_KEY
-API_KEY = os.environ.get("DATABENTO_API_KEY", "db-x5MB8c3vCxjin5s8CeARFrWAEBenb")
+def load_data(file_path):
+    """Load VIX options data from CSV or ZIP"""
+    print(f"Loading data from {file_path}...")
 
-# Date range for data (3 years)
-END_DATE = datetime.now().strftime("%Y-%m-%d")
-START_DATE = (datetime.now() - timedelta(days=3*365)).strftime("%Y-%m-%d")
+    if file_path.endswith('.zip'):
+        with zipfile.ZipFile(file_path, 'r') as zf:
+            csv_name = [n for n in zf.namelist() if n.endswith('.csv')][0]
+            with zf.open(csv_name) as f:
+                df = pd.read_csv(f)
+    else:
+        df = pd.read_csv(file_path)
 
-# Output file for cached data
-OUTPUT_FILE = "vix_options_databento.csv"
+    # Convert date columns
+    for col in ['quote_date', 'expiration']:
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col])
 
-# =============================================================================
-# FETCH DATA FROM DATABENTO
-# =============================================================================
+    # Calculate DTE
+    if 'quote_date' in df.columns and 'expiration' in df.columns:
+        df['dte'] = (df['expiration'] - df['quote_date']).dt.days
 
-def fetch_vix_options(api_key, start_date, end_date):
-    """Fetch VIX options data from Databento"""
-    import databento as db
+    print(f"Loaded {len(df):,} rows")
+    print(f"Columns: {df.columns.tolist()}")
+    print(f"Date range: {df['quote_date'].min()} to {df['quote_date'].max()}")
 
-    print(f"Connecting to Databento...")
-    client = db.Historical(api_key)
-
-    # VIX options are on CBOE - dataset is OPRA for US options
-    # The symbol for VIX options is "VIX" with option suffixes
-    # We need end-of-day data with bid/ask
-
-    print(f"Fetching VIX options data from {start_date} to {end_date}...")
-    print("This may take a few minutes and will use your Databento credits...")
-
-    # Try OPRA dataset for options (includes CBOE)
-    # Schema: Use 'ohlcv-1d' for daily data or 'tbbo' for best bid/offer
-    try:
-        # First, let's check available datasets
-        datasets = client.metadata.list_datasets()
-        print(f"\nAvailable datasets: {datasets[:10]}...")
-
-        # Look for CBOE or options datasets
-        opra_datasets = [d for d in datasets if 'OPRA' in d.upper() or 'CBOE' in d.upper()]
-        print(f"Options-related datasets: {opra_datasets}")
-
-        # For VIX options, we likely need OPRA.PILLAR or similar
-        # Let's try to get the data
-        data = client.timeseries.get_range(
-            dataset="OPRA.PILLAR",  # OPRA is the options price reporting authority
-            symbols=["VIX*.C*", "VIX*.P*"],  # All VIX calls and puts
-            schema="ohlcv-1d",  # Daily OHLCV
-            start=start_date,
-            end=end_date,
-        )
-
-        df = data.to_df()
-        print(f"Fetched {len(df):,} rows")
-        return df
-
-    except Exception as e:
-        print(f"Error with OPRA.PILLAR: {e}")
-        print("\nTrying alternative approach...")
-
-        # Try listing available symbols for VIX
-        try:
-            # Check what's available
-            publishers = client.metadata.list_publishers()
-            print(f"Publishers: {publishers[:5]}...")
-
-            # Try CBOE directly
-            data = client.timeseries.get_range(
-                dataset="CBOE.FUTURES",  # Try CBOE futures (VIX futures)
-                symbols=["VX*"],
-                schema="ohlcv-1d",
-                start=start_date,
-                end=end_date,
-            )
-            df = data.to_df()
-            print(f"Fetched {len(df):,} rows from CBOE.FUTURES")
-            return df
-
-        except Exception as e2:
-            print(f"Error with CBOE.FUTURES: {e2}")
-
-            # Last resort - try to get any VIX-related data
-            print("\nAttempting to list available datasets for reference...")
-            try:
-                for ds in datasets:
-                    if 'VIX' in ds.upper() or 'CBOE' in ds.upper() or 'OPT' in ds.upper():
-                        print(f"  Potentially relevant: {ds}")
-            except:
-                pass
-
-            return None
-
-
-def fetch_vix_spot(api_key, start_date, end_date):
-    """Fetch VIX spot/index data as fallback"""
-    import databento as db
-
-    client = db.Historical(api_key)
-
-    try:
-        # Try to get VIX index data
-        data = client.timeseries.get_range(
-            dataset="CBOE.STREAMING",
-            symbols=["VIX.XO"],  # VIX index
-            schema="ohlcv-1d",
-            start=start_date,
-            end=end_date,
-        )
-        return data.to_df()
-    except Exception as e:
-        print(f"Could not fetch VIX spot: {e}")
-        return None
+    return df
 
 
 # =============================================================================
-# STRATEGY BACKTEST (same as staggered_absolute_strategy.py)
+# STRATEGY FUNCTIONS
 # =============================================================================
 
 def get_settlement_vix(df, expiration):
@@ -183,6 +100,22 @@ def run_staggered_absolute(df, short_strike=35, long_strike=45, dte_min=60, dte_
                            target_positions=3, starting_capital=40000, entry_interval_days=28):
     """
     Staggered expiration strategy with absolute strikes.
+
+    Parameters:
+    -----------
+    short_strike : float = 35
+    long_strike : float = 45
+    dte_min : int = 60
+    dte_max : int = 100
+    target_positions : int = 3
+    starting_capital : float = 40000
+    entry_interval_days : int = 28
+
+    Returns:
+    --------
+    trades : DataFrame
+    final_capital : float
+    open_positions : list
     """
     trading_dates = sorted(df['quote_date'].unique())
 
@@ -257,8 +190,12 @@ def run_staggered_absolute(df, short_strike=35, long_strike=45, dte_min=60, dte_
     return pd.DataFrame(closed_trades), capital, open_positions
 
 
+# =============================================================================
+# ANALYSIS
+# =============================================================================
+
 def analyze_results(trades, starting_capital=40000):
-    """Analyze strategy results"""
+    """Analyze and print strategy results"""
     if len(trades) == 0:
         print("No trades to analyze")
         return
@@ -282,7 +219,8 @@ def analyze_results(trades, starting_capital=40000):
 
     print(f"""
 ================================================================================
-STAGGERED ABSOLUTE STRATEGY RESULTS (35/45 spread, 60-100 DTE, 3 positions)
+STAGGERED ABSOLUTE STRATEGY RESULTS
+35/45 Call Spread | 60-100 DTE | 3 Overlapping Positions | Hold to Expiry
 ================================================================================
 
 DATA PERIOD: {trades['entry_date'].min().strftime('%Y-%m-%d')} to {trades['exit_date'].max().strftime('%Y-%m-%d')} ({years:.1f} years)
@@ -306,30 +244,79 @@ RISK:
 """)
 
     # Yearly breakdown
+    trades = trades.copy()
     trades['year'] = trades['entry_date'].dt.year
+
     print("YEARLY BREAKDOWN")
-    print("="*60)
-    print(f"{'Year':<8} {'Trades':>8} {'Wins':>8} {'P&L':>15} {'End Capital':>15}")
-    print("-"*60)
+    print("="*70)
+    print(f"{'Year':<8} {'Trades':>8} {'Wins':>8} {'Losses':>8} {'P&L':>15} {'End Capital':>15}")
+    print("-"*70)
 
     for year in sorted(trades['year'].unique()):
         yr = trades[trades['year'] == year]
         yr_wins = yr['win'].sum()
+        yr_losses = len(yr) - yr_wins
         yr_pnl = yr['total_pnl'].sum()
         yr_end = yr['capital_after'].iloc[-1]
-        print(f"{year:<8} {len(yr):>8} {yr_wins:>8} ${yr_pnl:>14,.0f} ${yr_end:>14,.0f}")
+        sign = '+' if yr_pnl >= 0 else ''
+        print(f"{year:<8} {len(yr):>8} {yr_wins:>8} {yr_losses:>8} {sign}${yr_pnl:>14,.0f} ${yr_end:>14,.0f}")
 
     # Show losing trades
     losers = trades[~trades['win']]
     if len(losers) > 0:
         print(f"\nLOSING TRADES ({len(losers)})")
-        print("-"*70)
+        print("-"*80)
         for _, row in losers.iterrows():
             print(f"  {row['entry_date'].strftime('%Y-%m-%d')} -> {row['exit_date'].strftime('%Y-%m-%d')}: "
                   f"VIX {row['vix_entry']:.1f} -> {row['vix_exp']:.1f}, "
                   f"{row['contracts']} contracts, ${row['total_pnl']:,.0f}")
     else:
-        print("\nNo losing trades in this period!")
+        print("\n*** NO LOSING TRADES IN THIS PERIOD! ***")
+
+    return {
+        'final_capital': final_capital,
+        'cagr': cagr,
+        'win_rate': win_rate,
+        'max_drawdown': max_dd,
+        'trades': len(trades),
+        'losses': losses
+    }
+
+
+def check_data_quality(df):
+    """Check if the data has the required columns and format"""
+    print("\n" + "="*60)
+    print("DATA QUALITY CHECK")
+    print("="*60)
+
+    required_cols = ['quote_date', 'expiration', 'strike', 'option_type',
+                     'bid_eod', 'ask_eod', 'underlying_bid_eod']
+
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        print(f"\n*** MISSING COLUMNS: {missing} ***")
+        print("Available columns:", df.columns.tolist())
+        return False
+
+    print(f"\n✓ All required columns present")
+
+    # Check data ranges
+    print(f"\nData summary:")
+    print(f"  Dates: {df['quote_date'].min()} to {df['quote_date'].max()}")
+    print(f"  Strikes: {df['strike'].min()} to {df['strike'].max()}")
+    print(f"  VIX range: {df['underlying_bid_eod'].min():.1f} to {df['underlying_bid_eod'].max():.1f}")
+    print(f"  Option types: {df['option_type'].unique()}")
+
+    # Check for 35 and 45 strikes
+    has_35 = 35 in df['strike'].values
+    has_45 = 45 in df['strike'].values
+    print(f"  Has strike 35: {has_35}")
+    print(f"  Has strike 45: {has_45}")
+
+    if not has_35 or not has_45:
+        print("\n*** WARNING: Missing 35 or 45 strikes - strategy may not execute ***")
+
+    return True
 
 
 # =============================================================================
@@ -337,52 +324,34 @@ RISK:
 # =============================================================================
 
 def main():
-    print("="*80)
-    print("VIX OPTIONS STRATEGY TESTER - DATABENTO")
-    print("="*80)
-    print(f"\nFetching data from {START_DATE} to {END_DATE}...")
+    # Get file path from command line or use default
+    if len(sys.argv) > 1:
+        file_path = sys.argv[1]
+    else:
+        # Try to find the zip file
+        import os
+        for f in ['vix_options_databento.csv.zip', 'vix_options_databento.csv',
+                  'analysis/vix_options_databento.csv.zip']:
+            if os.path.exists(f):
+                file_path = f
+                break
+        else:
+            print("Usage: python test_databento_data.py <path_to_data>")
+            print("Expected: vix_options_databento.csv.zip")
+            return
 
-    # Try to fetch data
-    df = fetch_vix_options(API_KEY, START_DATE, END_DATE)
+    # Load data
+    df = load_data(file_path)
 
-    if df is None or len(df) == 0:
-        print("\n" + "="*80)
-        print("COULD NOT FETCH OPTIONS DATA")
-        print("="*80)
-        print("""
-Databento may not have VIX options in the expected format.
-
-ALTERNATIVES:
-1. Check Databento's documentation for the correct dataset/schema for CBOE VIX options
-2. Use their web interface to browse available data
-3. Contact Databento support for the correct symbols
-
-The dataset you need is likely one of:
-- OPRA.PILLAR (US options)
-- CBOE.* (CBOE-specific data)
-
-Symbols for VIX options typically look like:
-- VIX 230118C00025000 (VIX Jan 18 2023 25 Call)
-""")
+    # Check data quality
+    if not check_data_quality(df):
+        print("\nData quality check failed. Please verify the data format.")
         return
 
-    # If we got data, process it
-    print(f"\nLoaded {len(df):,} rows")
-    print(f"Columns: {df.columns.tolist()}")
-    print(f"\nSample data:")
-    print(df.head())
-
-    # Save to CSV for future use
-    df.to_csv(OUTPUT_FILE, index=False)
-    print(f"\nSaved data to {OUTPUT_FILE}")
-
-    # Transform data to expected format if needed
-    # (This depends on what Databento returns - may need adjustment)
-
-    # Run backtest
-    print("\n" + "="*80)
-    print("RUNNING STRATEGY BACKTEST")
-    print("="*80)
+    # Run strategy
+    print("\n" + "="*60)
+    print("RUNNING STAGGERED ABSOLUTE STRATEGY")
+    print("="*60)
 
     trades, final_capital, remaining = run_staggered_absolute(
         df,
@@ -395,12 +364,13 @@ Symbols for VIX options typically look like:
     )
 
     if len(trades) > 0:
-        analyze_results(trades, starting_capital=40000)
-    else:
-        print("No trades were executed. Check data format.")
+        results = analyze_results(trades, starting_capital=40000)
 
-    if len(remaining) > 0:
-        print(f"\nNote: {len(remaining)} positions still open at end of data")
+        if len(remaining) > 0:
+            print(f"\nNote: {len(remaining)} positions still open at end of data")
+
+    else:
+        print("\nNo trades executed. Check if data contains 35/45 strikes at 60-100 DTE.")
 
 
 if __name__ == "__main__":
